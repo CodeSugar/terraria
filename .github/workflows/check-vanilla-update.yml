@@ -1,0 +1,69 @@
+name: Check Vanilla Server Update
+
+on:
+  schedule:
+    - cron: '0 6 * * *' # Every day at 06:00 UTC
+  workflow_dispatch: # Allow manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  check-update:
+    name: Check for new vanilla server version
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Query latest server version
+        id: check
+        run: |
+          # Fetch the dedicated server names from the API
+          RESPONSE=$(curl -sf "https://terraria.org/api/get/dedicated-servers-names")
+          if [ -z "$RESPONSE" ]; then
+            echo "Failed to fetch server names from API"
+            exit 1
+          fi
+
+          # Extract the first entry and get the version number
+          # e.g. ["terraria-server-1455.zip",...] -> 1455
+          LATEST_VERSION=$(echo "$RESPONSE" | jq -r '.[0]' | grep -oP '\d+(?=\.zip)')
+          if [ -z "$LATEST_VERSION" ]; then
+            echo "Failed to parse version from API response: $RESPONSE"
+            exit 1
+          fi
+          echo "Latest version from API: $LATEST_VERSION"
+
+          # Read current version from Dockerfile
+          CURRENT_VERSION=$(grep -oP '(?<=ENV DL_VERSION=)\d+' vanilla/Dockerfile)
+          echo "Current version in Dockerfile: $CURRENT_VERSION"
+
+          if [ "$LATEST_VERSION" = "$CURRENT_VERSION" ]; then
+            echo "Version is already up to date ($CURRENT_VERSION)"
+            echo "updated=false" >> $GITHUB_OUTPUT
+          else
+            echo "New version available: $CURRENT_VERSION -> $LATEST_VERSION"
+            echo "updated=true" >> $GITHUB_OUTPUT
+            echo "version=$LATEST_VERSION" >> $GITHUB_OUTPUT
+
+            # Convert numeric version to dotted format (e.g. 1455 -> 1.4.5.5)
+            DOTTED=$(echo "$LATEST_VERSION" | sed 's/./&./g' | sed 's/\.$//')
+            echo "tag=vanilla-${DOTTED}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update Dockerfile
+        if: steps.check.outputs.updated == 'true'
+        run: |
+          sed -i "s/ENV DL_VERSION=.*/ENV DL_VERSION=${{ steps.check.outputs.version }}/" vanilla/Dockerfile
+
+      - name: Commit and tag
+        if: steps.check.outputs.updated == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add vanilla/Dockerfile
+          git commit -m "Update vanilla server to ${{ steps.check.outputs.tag }}"
+          git tag "${{ steps.check.outputs.tag }}"
+          git push origin master --tags
